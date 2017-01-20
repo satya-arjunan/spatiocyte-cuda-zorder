@@ -1,10 +1,10 @@
-spatiocyte-cuda
-===============
+spatiocyte-cuda-zorder
+======================
 
-A CUDA standalone Spatiocyte package.
+A CUDA standalone Spatiocyte package with Z-order curve voxels.
 
-1. Get spatiocyte-cuda
-    * $ git clone https://github.com/satya-arjunan/spatiocyte-cuda.git
+1. Get spatiocyte-cuda-zorder
+    * $ git clone https://github.com/satya-arjunan/spatiocyte-cuda-zorder.git
 
 2. Compile spatiocyte-cuda
     * add CUDA nvcc path (e.g., /usr/local/cuda-8.0/bin) into the PATH enviroment variable

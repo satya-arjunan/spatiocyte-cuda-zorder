@@ -93,6 +93,45 @@ double Diffuser::get_D() const {
 */
 
 
+__device__
+uint16_t get_third_bits(const uint32_t m) {
+	uint32_t x = m & 0x9249249;
+	x = (x ^ (x >> 2)) & 0x30c30c3;
+	x = (x ^ (x >> 4)) & 0x0300f00f;
+	x = (x ^ (x >> 8)) & 0x30000ff;
+	x = (x ^ (x >> 16)) & 0x000003ff;
+	return static_cast<uint16_t>(x);
+}
+
+__device__ 
+void decode_zorder(const uint32_t m, uint16_t& row, uint16_t& col,
+    uint16_t& lay){
+	uint16_t x = get_third_bits(m);
+	uint16_t y = get_third_bits(m >> 1);
+	uint16_t z = get_third_bits(m >> 2);
+  col = y;
+  row = z;
+  lay = x;
+}
+
+__device__
+uint32_t split_3bits(const uint16_t a) {
+	uint32_t x = a;
+	x = x & 0x000003ff;
+	x = (x | x << 16) & 0x30000ff;
+	x = (x | x << 8)  & 0x0300f00f;
+	x = (x | x << 4)  & 0x30c30c3;
+	x = (x | x << 2)  & 0x9249249;
+	return x;
+}
+
+__device__
+uint32_t encode_zorder(const uint16_t x, const uint16_t y, const uint16_t z){
+	return split_3bits(x) |
+    (split_3bits(y) << 1) |
+    (split_3bits(z) << 2);
+}
+
 __global__
 void concurrent_walk(
     const unsigned mol_size_,
@@ -171,30 +210,69 @@ void concurrent_walk(
     uint16_t rand16((uint16_t)(rand32 & 0x0000FFFFuL));
     uint32_t rand(((uint32_t)rand16*12) >> 16);
     umol_t vdx(mols_[index]);
-    bool odd_lay((vdx/NUM_COLROW)&1);
-    bool odd_col((vdx%NUM_COLROW/NUM_ROW)&1);
+    uint16_t row, col, lay;
+    decode_zorder(vdx, row, col, lay);
+    if(col >= NUM_COL-1 || row >= NUM_ROW-1 || lay >= NUM_LAY-1) {
+      printf("col:%d row:%d lay:%d\n", col, row, lay);
+      continue;
+    }
+    bool odd_lay(lay&1);
+    bool odd_col(col&1);
     mol2_t val(mol2_t(vdx)+offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+    uint16_t x(val/NUM_COLROW);
+    uint16_t y(val%NUM_COLROW/NUM_ROW);
+    uint16_t z(val%NUM_COLROW%NUM_ROW);
+    if(x >= NUM_COL || y >= NUM_ROW || z >= NUM_LAY) {
+      printf("x:%d y:%d z:%d val:%d\n", x, y, z, val);
+      continue;
+    }
+    umol_t zval(encode_zorder(x, y, z));
+    /*
+    if(zval >= NUM_VOXEL) {
+      printf("zval:%d\n", zval);
+      continue;
+    }
+    */
     //Atomically put the current molecule id, index+id_stride_ at the target
     //voxel if it is vacant: 
-    voxel_t tar_mol_id(atomicCAS(voxels_+val, vac_id_, index+id_stride_));
+    voxel_t tar_mol_id(atomicCAS(voxels_+zval, vac_id_, index+id_stride_));
     //If not occupied, finalize walk:
     if(tar_mol_id == vac_id_) {
       voxels_[vdx] = vac_id_;
-      mols_[index] = val;
+      mols_[index] = zval;
     }
     index += total_threads;
     if(index < mol_size_) {
       rand16 = (uint16_t)(rand32 >> 16);
       rand = ((uint32_t)rand16*12) >> 16;
       vdx = mols_[index];
-      odd_lay = (vdx/NUM_COLROW)&1;
-      odd_col = (vdx%NUM_COLROW/NUM_ROW)&1;
+      decode_zorder(vdx, row, col, lay);
+      if(col >= NUM_COL-1 || row >= NUM_ROW-1 || lay >= NUM_LAY-1) {
+        printf("col:%d row:%d lay:%d\n", col, row, lay);
+        continue;
+      }
+      odd_lay = (lay&1);
+      odd_col = (col&1);
       val = mol2_t(vdx)+offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))];
-      tar_mol_id = (atomicCAS(voxels_+val, vac_id_, index+id_stride_));
+      x = (val/NUM_COLROW);
+      y = (val%NUM_COLROW/NUM_ROW);
+      z = (val%NUM_COLROW%NUM_ROW);
+      if(x >= NUM_COL || y >= NUM_ROW || z >= NUM_LAY) {
+        printf("x:%d y:%d z:%d\n", x, y, z, val);
+        continue;
+      }
+      zval = encode_zorder(x, y, z);
+      /*
+      if(zval >= NUM_VOXEL) {
+        printf("zval:%d\n", zval);
+        continue;
+      }
+      */
+      tar_mol_id = (atomicCAS(voxels_+zval, vac_id_, index+id_stride_));
       //If not occupied, finalize walk:
       if(tar_mol_id == vac_id_) {
         voxels_[vdx] = vac_id_;
-        mols_[index] = val;
+        mols_[index] = zval;
       }
       index += total_threads;
     }
@@ -204,6 +282,7 @@ void concurrent_walk(
 
 void Diffuser::walk() {
   const size_t size(mols_.size());
+  /*
   concurrent_walk<<<64, 256>>>(
       size,
       seed_,
@@ -213,6 +292,7 @@ void Diffuser::walk() {
       null_id_,
       thrust::raw_pointer_cast(&mols_[0]),
       thrust::raw_pointer_cast(&voxels_[0]));
+      */
   seed_ += size;
   cudaThreadSynchronize();
 }

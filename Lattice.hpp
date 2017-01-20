@@ -46,7 +46,15 @@ class Lattice {
   Vector<unsigned> mol_to_coord(const umol_t) const;
   const Vector<unsigned>& get_dimensions() const;
   thrust::device_vector<voxel_t>& get_voxels();
+  void i2zorder_xyz(const umol_t, humol_t&, humol_t&, humol_t&);
+  umol_t zorder_xyz2i(const humol_t, const humol_t, const humol_t);
+  umol_t i2z(const umol_t);
+  umol_t z2i(const umol_t);
  private:
+  umol_t split_3bits(const humol_t);
+  humol_t get_third_bits(const umol_t);
+  umol_t encode_zorder(const humol_t, const humol_t, const humol_t);
+  void decode_zorder(const umol_t, humol_t&, humol_t&, humol_t&);
   const Vector<unsigned> dimensions_;
   thrust::device_vector<voxel_t> voxels_;
 };

@@ -37,7 +37,7 @@
 
 int main() {
   Model model;
-  Species A("A", 53687091, 1e-12, model, model.get_compartment(),
+  Species A("A", 5368, 1e-12, model, model.get_compartment(),
             model.get_compartment().get_volume_species());
   /*
   Species B("B", 800256, 1e-12, model, model.get_compartment(),
@@ -51,28 +51,26 @@ int main() {
   AB_to_C.set_p(1);
   */
   model.initialize();
-  /*
   VisualLogger visual_logger(model);
-  */
   model.get_stepper().push_diffuser(A.get_diffuser());
   /*
   model.get_stepper().push_diffuser(B.get_diffuser());
   model.get_stepper().push_diffuser(C.get_diffuser());
+  */
   model.get_stepper().set_visual_logger(visual_logger);
   visual_logger.push_species(A);
-  visual_logger.push_species(B);
-  visual_logger.push_species(C);
-  //visual_logger.push_species(model.get_compartment().get_surface_species());
-  //visual_logger.push_species(model.get_compartment().get_volume_species());
+  //visual_logger.push_species(B);
+  //visual_logger.push_species(C);
+  visual_logger.push_species(model.get_compartment().get_surface_species());
+  visual_logger.push_species(model.get_compartment().get_volume_species());
   visual_logger.initialize();
-  */
 
 
   model.run(0.0001);
   boost::posix_time::ptime start(
       boost::posix_time::microsec_clock::universal_time()); 
   //model.run(0.1);
-  unsigned steps(100);
+  unsigned steps(10);
   //unsigned steps(model.run(0.5));
   model.step(steps);
   cudaDeviceSynchronize();

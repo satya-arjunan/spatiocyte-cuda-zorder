@@ -165,18 +165,19 @@ void Compartment::set_volume_structure() {
 
 void Compartment::set_surface_structure() {
   for (umol_t i(0); i != NUM_COLROW; ++i) {
+    //top and bottom (xy) surfaces:
     get_surface_species().push_host_mol(i);
     get_surface_species().push_host_mol(NUM_VOXEL-1-i);
   }
   for (umol_t i(1); i != NUM_LAY-1; ++i) {
-    //layer_row yz-plane
     for (umol_t j(0); j != NUM_ROW; ++j) {
+      //layer_row yz-plane
       get_surface_species().push_host_mol(i*NUM_COLROW+j);
       get_surface_species().push_host_mol(i*NUM_COLROW+j+NUM_ROW*
                                          (NUM_COL-1));
     }
-    //layer_col xz-plane
     for (umol_t j(1); j != NUM_COL-1; ++j) {
+      //layer_col xz-plane
       get_surface_species().push_host_mol(i*NUM_COLROW+j*NUM_ROW);
       get_surface_species().push_host_mol(i*NUM_COLROW+j*NUM_ROW+
                                          NUM_ROW-1);
@@ -184,5 +185,28 @@ void Compartment::set_surface_structure() {
   }
   get_surface_species().populate_in_lattice();
 }
+/*
+void Compartment::set_surface_structure() {
+  for (umol_t i(0); i != NUM_COLROW; ++i) {
+    get_surface_species().push_host_mol(lattice_.i2z(i));
+    get_surface_species().push_host_mol(lattice_.i2z(NUM_VOXEL-1-i));
+  }
+  for (umol_t i(1); i != NUM_LAY-1; ++i) {
+    //layer_row yz-plane
+    for (umol_t j(0); j != NUM_ROW; ++j) {
+      get_surface_species().push_host_mol(lattice_.i2z(i*NUM_COLROW+j));
+      get_surface_species().push_host_mol(lattice_.i2z(i*NUM_COLROW+j+NUM_ROW*
+                                         (NUM_COL-1)));
+    }
+    //layer_col xz-plane
+    for (umol_t j(1); j != NUM_COL-1; ++j) {
+      get_surface_species().push_host_mol(lattice_.i2z(i*NUM_COLROW+j*NUM_ROW));
+      get_surface_species().push_host_mol(lattice_.i2z(i*NUM_COLROW+j*NUM_ROW+
+                                         NUM_ROW-1));
+    }
+  }
+  get_surface_species().populate_in_lattice();
+}
+*/
 
 
