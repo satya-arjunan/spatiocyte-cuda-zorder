@@ -206,11 +206,9 @@ std::vector<umol_t>& Species::get_host_mols() {
     host_mols_.resize(mols_.size());
     thrust::copy(mols_.begin(), mols_.end(), host_mols_.begin());
   }
-  /*
   for(unsigned i(0); i != host_mols_.size(); ++i) {
     host_mols_[i] = compartment_.get_lattice().z2i(host_mols_[i]);
   }
-  */
   return host_mols_;
 }
 
