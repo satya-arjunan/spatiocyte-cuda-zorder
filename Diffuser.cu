@@ -216,7 +216,6 @@ uint32_t encode_zorder(const uint16_t x, const uint16_t y, const uint16_t z){
 __global__
 void concurrent_walk(
     const unsigned mol_size_,
-    const unsigned seed_,
     const voxel_t stride_,
     const voxel_t id_stride_,
     const voxel_t vac_id_,
@@ -330,14 +329,16 @@ void Diffuser::walk() {
   const size_t size(mols_.size());
   concurrent_walk<<<32, 256>>>(
       size,
-      seed_,
       stride_,
       id_stride_,
       vac_id_,
       null_id_,
       thrust::raw_pointer_cast(&mols_[0]),
       thrust::raw_pointer_cast(&voxels_[0]));
-  seed_ += size;
+  ++seed_;
+  if(seed_%11 == 0) {
+    thrust::sort(thrust::device, mols_.begin(), mols_.end());
+  }
   cudaThreadSynchronize();
 }
 
