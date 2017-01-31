@@ -281,8 +281,8 @@ void concurrent_walk(
     offsets_[46] = NUM_COLROW;
     offsets_[47] = NUM_COLROW+NUM_ROW;
   }
-  volatile __shared__ unsigned vdx[256];
-  volatile __shared__ unsigned tars[256];
+  volatile __shared__ unsigned vdx[512];
+  volatile __shared__ unsigned tars[512];
   __syncthreads();
   //index is the unique global thread id (size: total_threads)
   unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
@@ -316,7 +316,7 @@ void concurrent_walk(
 
 void Diffuser::walk() {
   const size_t size(voxels_.size());
-  concurrent_walk<<<blocks_, 256>>>(
+  concurrent_walk<<<blocks_, 512>>>(
       size,
       stride_,
       id_stride_,
