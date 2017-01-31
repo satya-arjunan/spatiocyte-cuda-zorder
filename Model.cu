@@ -56,7 +56,7 @@ void Model::initialize() {
   //better performance when the number of blocks is twice the number of 
   //multi processors (aka streams):
   blocks_ = prop.multiProcessorCount*4;
-  std::cout << "number blocks:" << blocks_ << std::endl;
+  std::cout << "number blocks:" << blocks_ << " shared memory (K):" << prop.sharedMemPerBlock/1024 << std::endl;
   /*
   //Ordered from fastest to slowest:
   curandCreateGenerator(&random_generator_, CURAND_RNG_PSEUDO_XORWOW);
