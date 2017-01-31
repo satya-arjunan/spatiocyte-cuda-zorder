@@ -84,24 +84,28 @@ struct populate_lattice {
       const voxel_t vac_id,
       const voxel_t stride_id,
       const umol_t voxel_size, 
+      const umol_t shift,
       voxel_t* voxels):
     seed_(seed),
     mol_size_(mol_size),
     vac_id_(vac_id),
     stride_id_(stride_id),
     voxel_size_(voxel_size),
+    shift_(shift),
     voxels_(voxels) {} 
   __device__ umol_t operator()(const unsigned n) const {
     thrust::default_random_engine rng(seed_);
     rng.discard(n);
     thrust::uniform_int_distribution<unsigned> u(0, voxel_size_);
     unsigned rand(u(rng));
-    voxel_t res(atomicCAS(voxels_+rand, vac_id_, stride_id_+n));
+    unsigned lat_mol(rand >> shift_);
+    voxel_t res(atomicCAS(voxels_+lat_mol, vac_id_, rand));
     unsigned cnt(0);
     while(res != vac_id_) {
       rng.discard(n+mol_size_*(++cnt));
       rand = u(rng);
-      res = atomicCAS(voxels_+rand, vac_id_, stride_id_+n);
+      lat_mol = rand >> shift_;
+      res = atomicCAS(voxels_+lat_mol, vac_id_, rand);
     }
     return rand;
   }
@@ -110,6 +114,7 @@ struct populate_lattice {
   const voxel_t vac_id_;
   const voxel_t stride_id_;
   const umol_t voxel_size_;
+  const umol_t shift_;
   voxel_t* voxels_;
 };
 
@@ -125,7 +130,8 @@ void Species::populate() {
         init_nmols_,
         vac_id_,
         get_id()*model_.get_stride(),
-        voxels_.size(),
+        NUM_VOXEL,
+        log2(double(NUM_VOXEL))-log2(double(voxels_.size())),
         thrust::raw_pointer_cast(&voxels_[0])));
 }
 
@@ -192,6 +198,10 @@ const std::string Species::get_name_id() const {
   return std::string(get_name()+":"+sid.str());
   */
   return std::string(get_name()+":id:"+std::to_string(get_id())); // c++11
+}
+
+umol_t Species::get_init_nmols() const {
+  return init_nmols_;
 }
 
 const std::string Species::get_init_name(const std::string name) const {

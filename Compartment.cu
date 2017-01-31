@@ -59,7 +59,12 @@ void Compartment::initialize() {
         "Common.hpp. Exiting now..." << std::endl;
       exit(0);
     }
-  lattice_.initialize();
+  std::vector<Species*> species(model_.get_species());
+  umol_t total_nmols(0);
+  for(umol_t i(0); i != species.size(); ++i) {
+    total_nmols += species[i]->get_init_nmols();
+  }
+  lattice_.initialize(total_nmols);
   set_offsets();
   set_volume_structure();
   set_surface_structure();
@@ -207,7 +212,7 @@ void Compartment::set_surface_structure() {
                                          NUM_ROW-1));
     }
   }
-  get_surface_species().populate_in_lattice();
+  //get_surface_species().populate_in_lattice();
 }
 
 

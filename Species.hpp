@@ -60,6 +60,7 @@ public:
   std::vector<umol_t>& get_host_mols();
   thrust::device_vector<umol_t>& get_mols();
   std::vector<Reaction*>& get_reactions();
+  umol_t get_init_nmols() const;
 private:
   const std::string get_init_name(const std::string) const;
 private:

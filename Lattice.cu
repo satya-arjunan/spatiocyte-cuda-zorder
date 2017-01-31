@@ -34,11 +34,15 @@
 #include <Compartment.hpp>
 
 Lattice::Lattice(const Vector<unsigned>& dimensions):
-  voxels_(NUM_VOXEL, 0),
   dimensions_(dimensions) {
 }
 
-void Lattice::initialize() {
+void Lattice::initialize(const umol_t size) {
+  const double compression(1);
+  unsigned i(rint(log2(double(NUM_VOXEL))));
+  unsigned j(pow(2, rint(log2(size/compression)/3.0)*3));
+  std::cout << "i:" << i << " j:" << j << std::endl; 
+  voxels_.resize(j, 0);
   std::cout << "num_x:" << get_dimensions().x << " num_y:" << 
     get_dimensions().y << " num_z:" << get_dimensions().z  << " num_voxel:" <<
     get_num_voxel() << " memory:" << get_num_voxel()*sizeof(voxel_t)/

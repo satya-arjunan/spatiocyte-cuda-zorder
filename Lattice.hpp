@@ -39,7 +39,7 @@ class Lattice {
  public: 
   Lattice(const Vector<unsigned>&);
   ~Lattice() {}
-  void initialize();
+  void initialize(const umol_t);
   unsigned get_num_voxel() const; 
   bool is_mol_at_edge(const umol_t) const;
   umol_t coord_to_mol(const Vector<unsigned>&) const;
