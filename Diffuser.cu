@@ -282,14 +282,14 @@ void concurrent_walk(
     offsets_[47] = NUM_COLROW+NUM_ROW;
   }
   volatile __shared__ unsigned vdx[512];
+  unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
+  vdx[threadIdx.x] = voxels_[index];
   volatile __shared__ unsigned tars[512];
   __syncthreads();
   //index is the unique global thread id (size: total_threads)
-  unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
   const unsigned total_threads(blockDim.x*gridDim.x);
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   while(index < voxel_size_) {
-    vdx[threadIdx.x] = voxels_[index];
     if(vdx[threadIdx.x]) {
       const uint32_t rand32(curand(&local_state));
       uint16_t rand16((uint16_t)(rand32 & 0x0000FFFFuL));
