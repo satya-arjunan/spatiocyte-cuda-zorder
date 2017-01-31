@@ -281,23 +281,20 @@ void concurrent_walk(
     offsets_[46] = NUM_COLROW;
     offsets_[47] = NUM_COLROW+NUM_ROW;
   }
-  volatile __shared__ unsigned zvdx[512];
-  unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
-  zvdx[threadIdx.x] = voxels_[index];
-  __syncthreads();
-  volatile __shared__ unsigned vdx[512];
-  vdx[threadIdx.x] = z2i(zvdx[threadIdx.x]);
-  __syncthreads();
-  volatile __shared__ unsigned tars[512];
+  volatile __shared__ unsigned vdx[1024];
+  volatile __shared__ unsigned tars[1024];
   __syncthreads();
   //index is the unique global thread id (size: total_threads)
+  unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
   const unsigned total_threads(blockDim.x*gridDim.x);
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   while(index < voxel_size_) {
-    if(zvdx[threadIdx.x]) {
+    vdx[threadIdx.x] = voxels_[index];
+    if(vdx[threadIdx.x]) {
       const uint32_t rand32(curand(&local_state));
       uint16_t rand16((uint16_t)(rand32 & 0x0000FFFFuL));
       uint32_t rand(((uint32_t)rand16*12) >> 16);
+      vdx[threadIdx.x] = z2i(vdx[threadIdx.x]);
       bool odd_lay((vdx[threadIdx.x]/NUM_COLROW)&1);
       bool odd_col((vdx[threadIdx.x]%NUM_COLROW/NUM_ROW)&1);
       tars[threadIdx.x] = i2z(mol2_t(vdx[threadIdx.x])+
@@ -316,34 +313,10 @@ void concurrent_walk(
   }
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
-/*
-  while(index < voxel_size_) {
-    umol_t zvdx(voxels_[index]);
-    if(zvdx) {
-      const uint32_t rand32(curand(&local_state));
-      uint16_t rand16((uint16_t)(rand32 & 0x0000FFFFuL));
-      uint32_t rand(((uint32_t)rand16*12) >> 16);
-      umol_t vdx(z2i(zvdx));
-      bool odd_lay((vdx/NUM_COLROW)&1);
-      bool odd_col((vdx%NUM_COLROW/NUM_ROW)&1);
-      mol2_t val(mol2_t(vdx)+offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
-      umol_t zval(i2z(val));
-      unsigned lat_mol(zval >> shift_);
-      if(lat_mol < voxel_size_) {
-        voxel_t tar_mol_id(atomicCAS(voxels_+lat_mol, vac_id_, zval));
-        //If not occupied, finalize walk:
-        if(tar_mol_id == vac_id_) {
-          voxels_[index] = vac_id_;
-        }
-      }
-    }
-    index += total_threads;
-  }
-  */
 
 void Diffuser::walk() {
   const size_t size(voxels_.size());
-  concurrent_walk<<<blocks_, 512>>>(
+  concurrent_walk<<<blocks_, 1024>>>(
       size,
       stride_,
       id_stride_,
