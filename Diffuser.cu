@@ -53,6 +53,8 @@ Diffuser::Diffuser(const double D, Species& species):
   seed_(0) {
 }
 
+__device__ __constant__ int offsets[48];
+
 void Diffuser::initialize() {
   Model& model(species_.get_model());
   stride_ = model.get_stride();
@@ -64,6 +66,7 @@ void Diffuser::initialize() {
   product_mols_.resize(model.get_species().size(), NULL);
   reacteds_.resize(mols_.size()+1, 0);
   thrust::sort(thrust::device, mols_.begin(), mols_.end());
+  cudaMemcpyToSymbol(offsets, thrust::raw_pointer_cast(&offsets_[0]), sizeof(int)*48);
  
   std::vector<Reaction*>& reactions(species_.get_reactions());
   for(unsigned i(0); i != reactions.size(); ++i) {
@@ -173,7 +176,6 @@ umol_t z2i(const umol_t zval) {
   return zorder_xyz2i(x, y, z);
 }
 
-
 //With bugs coalesced write: 13.3 BUPS
 __global__
 void concurrent_walk(
@@ -184,64 +186,6 @@ void concurrent_walk(
     const voxel_t null_id_,
     const unsigned shift_,
     voxel_t* voxels_) {
-  __shared__ int offsets_[48];
-  if(threadIdx.x == 0) {
-    //col=even, layer=even
-    offsets_[0] = -1;
-    offsets_[1] = 1;
-    offsets_[2] = -NUM_ROW-1;
-    offsets_[3] = -NUM_ROW;
-    offsets_[4] = NUM_ROW-1;
-    offsets_[5] = NUM_ROW;
-    offsets_[6] = -NUM_COLROW-NUM_ROW;
-    offsets_[7] = -NUM_COLROW-1;
-    offsets_[8] = -NUM_COLROW;
-    offsets_[9] = NUM_COLROW-NUM_ROW;
-    offsets_[10] = NUM_COLROW-1;
-    offsets_[11] = NUM_COLROW;
-
-    //col=even, layer=odd +24 = %layer*24
-    offsets_[24] = -1;
-    offsets_[25] = 1;
-    offsets_[26] = -NUM_ROW;
-    offsets_[27] = -NUM_ROW+1;
-    offsets_[28] = NUM_ROW;
-    offsets_[29] = NUM_ROW+1;
-    offsets_[30] = -NUM_COLROW;
-    offsets_[31] = -NUM_COLROW+1;
-    offsets_[32] = -NUM_COLROW+NUM_ROW;
-    offsets_[33] = NUM_COLROW;
-    offsets_[34] = NUM_COLROW+1;
-    offsets_[35] = NUM_COLROW+NUM_ROW;
-
-    //col=odd, layer=even +12 = %col*12
-    offsets_[12] = -1;
-    offsets_[13] = 1;
-    offsets_[14] = -NUM_ROW;
-    offsets_[15] = -NUM_ROW+1;
-    offsets_[16] = NUM_ROW;
-    offsets_[17] = NUM_ROW+1;
-    offsets_[18] = -NUM_COLROW-NUM_ROW;
-    offsets_[19] = -NUM_COLROW;
-    offsets_[20] = -NUM_COLROW+1;
-    offsets_[21] = NUM_COLROW-NUM_ROW;
-    offsets_[22] = NUM_COLROW;
-    offsets_[23] = NUM_COLROW+1;
-
-    //col=odd, layer=odd +36 = %col*12 + %layer*24
-    offsets_[36] = -1;
-    offsets_[37] = 1;
-    offsets_[38] = -NUM_ROW-1;
-    offsets_[39] = -NUM_ROW;
-    offsets_[40] = NUM_ROW-1;
-    offsets_[41] = NUM_ROW;
-    offsets_[42] = -NUM_COLROW-1;
-    offsets_[43] = -NUM_COLROW; //a
-    offsets_[44] = -NUM_COLROW+NUM_ROW;
-    offsets_[45] = NUM_COLROW-1;
-    offsets_[46] = NUM_COLROW;
-    offsets_[47] = NUM_COLROW+NUM_ROW;
-  }
   unsigned dx, tar, odd_lay, odd_col, rand, res, cnt;
   const unsigned block_mols(voxel_size_/gridDim.x);
   unsigned index(blockIdx.x*block_mols + threadIdx.x);
@@ -259,7 +203,7 @@ void concurrent_walk(
       dx = z2i(vdx[threadIdx.x]);
       odd_lay = ((dx/NUM_COLROW)&1);
       odd_col = ((dx%NUM_COLROW/NUM_ROW)&1);
-      tar = i2z(mol2_t(dx)+ offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      tar = i2z(mol2_t(dx)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
       dx = tar >> shift_;
       if(dx < voxel_size_) {
         res = 5;
