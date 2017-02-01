@@ -173,48 +173,137 @@ umol_t z2i(const umol_t zval) {
   return zorder_xyz2i(x, y, z);
 }
 
+
+//With bugs coalesced write: 13.3 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    voxel_t* voxels_) {
+  __shared__ int offsets_[48];
+  if(threadIdx.x == 0) {
+    //col=even, layer=even
+    offsets_[0] = -1;
+    offsets_[1] = 1;
+    offsets_[2] = -NUM_ROW-1;
+    offsets_[3] = -NUM_ROW;
+    offsets_[4] = NUM_ROW-1;
+    offsets_[5] = NUM_ROW;
+    offsets_[6] = -NUM_COLROW-NUM_ROW;
+    offsets_[7] = -NUM_COLROW-1;
+    offsets_[8] = -NUM_COLROW;
+    offsets_[9] = NUM_COLROW-NUM_ROW;
+    offsets_[10] = NUM_COLROW-1;
+    offsets_[11] = NUM_COLROW;
+
+    //col=even, layer=odd +24 = %layer*24
+    offsets_[24] = -1;
+    offsets_[25] = 1;
+    offsets_[26] = -NUM_ROW;
+    offsets_[27] = -NUM_ROW+1;
+    offsets_[28] = NUM_ROW;
+    offsets_[29] = NUM_ROW+1;
+    offsets_[30] = -NUM_COLROW;
+    offsets_[31] = -NUM_COLROW+1;
+    offsets_[32] = -NUM_COLROW+NUM_ROW;
+    offsets_[33] = NUM_COLROW;
+    offsets_[34] = NUM_COLROW+1;
+    offsets_[35] = NUM_COLROW+NUM_ROW;
+
+    //col=odd, layer=even +12 = %col*12
+    offsets_[12] = -1;
+    offsets_[13] = 1;
+    offsets_[14] = -NUM_ROW;
+    offsets_[15] = -NUM_ROW+1;
+    offsets_[16] = NUM_ROW;
+    offsets_[17] = NUM_ROW+1;
+    offsets_[18] = -NUM_COLROW-NUM_ROW;
+    offsets_[19] = -NUM_COLROW;
+    offsets_[20] = -NUM_COLROW+1;
+    offsets_[21] = NUM_COLROW-NUM_ROW;
+    offsets_[22] = NUM_COLROW;
+    offsets_[23] = NUM_COLROW+1;
+
+    //col=odd, layer=odd +36 = %col*12 + %layer*24
+    offsets_[36] = -1;
+    offsets_[37] = 1;
+    offsets_[38] = -NUM_ROW-1;
+    offsets_[39] = -NUM_ROW;
+    offsets_[40] = NUM_ROW-1;
+    offsets_[41] = NUM_ROW;
+    offsets_[42] = -NUM_COLROW-1;
+    offsets_[43] = -NUM_COLROW; //a
+    offsets_[44] = -NUM_COLROW+NUM_ROW;
+    offsets_[45] = NUM_COLROW-1;
+    offsets_[46] = NUM_COLROW;
+    offsets_[47] = NUM_COLROW+NUM_ROW;
+  }
+  unsigned dx, tar, odd_lay, odd_col, rand, res, cnt;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  volatile __shared__ unsigned vdx[1024];
+  cnt = block_mols/blockDim.x;
+  vdx[threadIdx.x] = voxels_[index];
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    unsigned x(vdx[threadIdx.x]);
+    __syncthreads();
+    if(x) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      dx = z2i(vdx[threadIdx.x]);
+      odd_lay = ((dx/NUM_COLROW)&1);
+      odd_col = ((dx%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dx)+ offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      if(dx < voxel_size_) {
+        res = 5;
+        if(dx >= index-threadIdx.x && dx < index-threadIdx.x+blockDim.x) {
+          res = atomicCAS((unsigned*)&vdx[0]+(dx-(index-threadIdx.x)), vac_id_, tar);
+        }
+        else {
+          res = atomicCAS(voxels_+dx, vac_id_, tar);
+        }
+        if(res == vac_id_) {
+          atomicExch((unsigned*)&vdx[threadIdx.x], vac_id_);
+          //vdx[threadIdx.x] = vac_id_;
+        }
+      }
+    }
+    __syncthreads();
+    voxels_[index] = vdx[threadIdx.x];
+    index += blockDim.x;
+    __syncthreads();
+    if(i < cnt-1) {
+      vdx[threadIdx.x] = voxels_[index];
+    }
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  const size_t size(voxels_.size());
+  concurrent_walk<<<blocks_, 1024>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+
+
 /*
-__device__
-uint16_t get_third_bits(const uint32_t m) {
-	uint32_t x = m & 0x9249249;
-	x = (x ^ (x >> 2)) & 0x30c30c3;
-	x = (x ^ (x >> 4)) & 0x0300f00f;
-	x = (x ^ (x >> 8)) & 0x30000ff;
-	x = (x ^ (x >> 16)) & 0x000003ff;
-	return static_cast<uint16_t>(x);
-}
-
-__device__ 
-void decode_zorder(const uint32_t m, uint16_t& row, uint16_t& col,
-    uint16_t& lay){
-	uint16_t x = get_third_bits(m);
-	uint16_t y = get_third_bits(m >> 1);
-	uint16_t z = get_third_bits(m >> 2);
-  col = y;
-  row = z;
-  lay = x;
-}
-
-__device__
-uint32_t split_3bits(const uint16_t a) {
-	uint32_t x = a;
-	x = x & 0x000003ff;
-	x = (x | x << 16) & 0x30000ff;
-	x = (x | x << 8)  & 0x0300f00f;
-	x = (x | x << 4)  & 0x30c30c3;
-	x = (x | x << 2)  & 0x9249249;
-	return x;
-}
-
-__device__
-uint32_t encode_zorder(const uint16_t x, const uint16_t y, const uint16_t z){
-	return split_3bits(x) |
-    (split_3bits(y) << 1) |
-    (split_3bits(z) << 2);
-}
-*/
-
-/*
+//No bugs not adjacent mol_blocks: 10.4 BUPS
 __global__
 void concurrent_walk(
     const unsigned voxel_size_,
@@ -331,6 +420,7 @@ void Diffuser::walk() {
 }
 */
 
+/*
 //using shared memory with 1024 threads: 11.3 BUPS
 __global__
 void concurrent_walk(
@@ -446,6 +536,7 @@ void Diffuser::walk() {
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
+*/
 
 /*
 //Compressed lattice: 9 BUPS
