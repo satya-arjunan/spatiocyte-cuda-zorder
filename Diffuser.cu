@@ -221,7 +221,7 @@ void concurrent_walk(
     const voxel_t vac_id_,
     const voxel_t null_id_,
     umol_t* mols_,
-    voxel_t* voxels_) {
+    const voxel_t* __restrict voxels_) {
   __shared__ int offsets_[48];
   if(threadIdx.x == 0) {
     //col=even, layer=even
