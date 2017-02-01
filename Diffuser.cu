@@ -284,7 +284,7 @@ void concurrent_walk(
   unsigned dx, tar, odd_lay, odd_col, rand;
   const unsigned block_mols(voxel_size_/gridDim.x);
   unsigned index(blockIdx.x*block_mols + threadIdx.x);
-  __shared__ unsigned vdx[1024];
+  volatile __shared__ unsigned vdx[1024];
   vdx[threadIdx.x] = voxels_[index];
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   __syncthreads();
@@ -299,7 +299,7 @@ void concurrent_walk(
       dx = tar >> shift_;
       if(dx < voxel_size_) {
         if(dx >= index && dx < index+blockDim.x) {
-          tar = atomicCAS(&vdx[0]+(dx-index), vac_id_, tar);
+          tar = atomicCAS((unsigned*)&vdx[0]+(dx-index), vac_id_, tar);
         }
         else {
           tar = atomicCAS(voxels_+dx, vac_id_, tar);
@@ -313,6 +313,7 @@ void concurrent_walk(
     }
     voxels_[index] = vdx[threadIdx.x];
     index += blockDim.x;
+    __syncthreads();
     if(i != 291) {
       vdx[threadIdx.x] = voxels_[index];
     }

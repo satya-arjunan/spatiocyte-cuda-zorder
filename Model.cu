@@ -55,6 +55,7 @@ void Model::initialize() {
   cudaGetDeviceProperties(&prop, 0);
   //better performance when the number of blocks is twice the number of 
   //multi processors (aka streams):
+  //blocks_ = prop.multiProcessorCount*2;
   blocks_ = prop.multiProcessorCount*2;
   std::cout << "number blocks:" << blocks_ << " shared memory (K):" <<
     prop.sharedMemPerBlock/1024 << " maxThreadsPerBlock:" << 
