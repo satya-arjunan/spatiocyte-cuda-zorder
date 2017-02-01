@@ -50,8 +50,8 @@ class VisualLogger;
 
 #define ADJS 12
 
-//typedef uint32_t voxel_t;
-typedef unsigned long long int voxel_t;
+typedef uint32_t voxel_t;
+//typedef unsigned long long int voxel_t;
 #define WORD (sizeof(voxel_t)*8)
 
 
