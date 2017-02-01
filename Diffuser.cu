@@ -322,10 +322,12 @@ void Diffuser::walk() {
       null_id_,
       thrust::raw_pointer_cast(&mols_[0]),
       thrust::raw_pointer_cast(&voxels_[0]));
+  /*
   ++seed_;
   if(seed_%11 == 0) {
     thrust::sort(thrust::device, mols_.begin(), mols_.end());
   }
+  */
   cudaThreadSynchronize();
 }
 

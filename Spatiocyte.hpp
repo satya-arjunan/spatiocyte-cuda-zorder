@@ -37,9 +37,9 @@
 #define LENGTH_Z 3.15e-6 //nlay
 */
 
-#define NUM_COL 1024
-#define NUM_LAY 1024
-#define NUM_ROW 1024
+#define NUM_COL 512
+#define NUM_LAY 512
+#define NUM_ROW 512
 
 
 /*
