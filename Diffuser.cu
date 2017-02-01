@@ -299,12 +299,12 @@ void concurrent_walk(
     //voxel if it is vacant: 
     voxel_t bor(1 << zval%WORD);
     unsigned idx(zval/WORD);
-    voxel_t tar_mol_id(atomicOr(voxels_+idx, bor));
+    voxel_t tar_mol_id(atomicOr((voxel_t*)voxels_+idx, bor));
     //If not occupied, finalize walk:
     if(!(tar_mol_id & bor)) {
       voxel_t band(~(1 << zvdx%WORD));
       idx = zvdx/WORD;
-      atomicAnd(voxels_+idx, band);
+      atomicAnd((voxel_t*)voxels_+idx, band);
       mols_[index] = zval;
     }
     index += total_threads;
@@ -322,10 +322,12 @@ void Diffuser::walk() {
       null_id_,
       thrust::raw_pointer_cast(&mols_[0]),
       thrust::raw_pointer_cast(&voxels_[0]));
+  /*
   ++seed_;
   if(seed_%11 == 0) {
     thrust::sort(thrust::device, mols_.begin(), mols_.end());
   }
+  */
   cudaThreadSynchronize();
 }
 
