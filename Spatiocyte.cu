@@ -37,7 +37,7 @@
 
 int main() {
   Model model;
-  Species A("A", 10000000, 1e-12, model, model.get_compartment(),
+  Species A("A", 9977856, 1e-12, model, model.get_compartment(),
             model.get_compartment().get_volume_species());
   /*
   Species B("B", 800256, 1e-12, model, model.get_compartment(),

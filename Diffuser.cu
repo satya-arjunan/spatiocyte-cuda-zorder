@@ -281,38 +281,76 @@ void concurrent_walk(
     offsets_[46] = NUM_COLROW;
     offsets_[47] = NUM_COLROW+NUM_ROW;
   }
-  volatile __shared__ unsigned vdx[1024];
-  volatile __shared__ unsigned tars[1024];
-  __syncthreads();
-  //index is the unique global thread id (size: total_threads)
-  unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
-  const unsigned total_threads(blockDim.x*gridDim.x);
+  unsigned dx, tar, odd_lay, odd_col, rand;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  __shared__ unsigned vdx[1024];
+  vdx[threadIdx.x] = voxels_[index];
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
-  while(index < voxel_size_) {
-    vdx[threadIdx.x] = voxels_[index];
+  __syncthreads();
+  for(unsigned i(0); i != 292; ++i) { 
     if(vdx[threadIdx.x]) {
-      const uint32_t rand32(curand(&local_state));
-      uint16_t rand16((uint16_t)(rand32 & 0x0000FFFFuL));
-      uint32_t rand(((uint32_t)rand16*12) >> 16);
-      vdx[threadIdx.x] = z2i(vdx[threadIdx.x]);
-      bool odd_lay((vdx[threadIdx.x]/NUM_COLROW)&1);
-      bool odd_col((vdx[threadIdx.x]%NUM_COLROW/NUM_ROW)&1);
-      tars[threadIdx.x] = i2z(mol2_t(vdx[threadIdx.x])+
-        offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
-      vdx[threadIdx.x] = tars[threadIdx.x] >> shift_;
-      if(vdx[threadIdx.x] < voxel_size_) {
-        tars[threadIdx.x] = atomicCAS(voxels_+vdx[threadIdx.x], vac_id_,
-              tars[threadIdx.x]);
-        if(tars[threadIdx.x] == vac_id_) {
-          voxels_[index] = vac_id_;
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      dx = z2i(vdx[threadIdx.x]);
+      odd_lay = ((dx/NUM_COLROW)&1);
+      odd_col = ((dx%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dx)+ offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      if(dx < voxel_size_) {
+        if(dx >= index && dx < index+blockDim.x) {
+          tar = atomicCAS(&vdx[0]+(dx-index), vac_id_, tar);
+        }
+        else {
+          tar = atomicCAS(voxels_+dx, vac_id_, tar);
+        }
+        //tar = atomicCAS(voxels_+dx, vac_id_, tar);
+        if(tar == vac_id_) {
+          vdx[threadIdx.x] = vac_id_;
+          //voxels_[index] = vac_id_;
         }
       }
     }
-    index += total_threads;
+    voxels_[index] = vdx[threadIdx.x];
+    index += blockDim.x;
+    if(i != 291) {
+      vdx[threadIdx.x] = voxels_[index];
+    }
     __syncthreads();
   }
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
+/*
+  unsigned tar, odd_lay, odd_col, rand;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  volatile __shared__ unsigned vdx[1024];
+  vdx[threadIdx.x] = voxels_[index];
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  for(unsigned i(0); i != 292; ++i) { 
+    if(vdx[threadIdx.x]) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      vdx[threadIdx.x] = z2i(vdx[threadIdx.x]);
+      odd_lay = ((vdx[threadIdx.x]/NUM_COLROW)&1);
+      odd_col = ((vdx[threadIdx.x]%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(vdx[threadIdx.x])+
+        offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      vdx[threadIdx.x] = tar >> shift_;
+      if(vdx[threadIdx.x] < voxel_size_) {
+        tar = atomicCAS(voxels_+vdx[threadIdx.x], vac_id_, tar);
+        if(tar == vac_id_) {
+          voxels_[index] = vac_id_;
+        }
+      }
+    }
+    index += blockDim.x;
+    if(i != 291) {
+      vdx[threadIdx.x] = voxels_[index];
+    }
+    __syncthreads();
+  }
+  */
 
 void Diffuser::walk() {
   const size_t size(voxels_.size());
