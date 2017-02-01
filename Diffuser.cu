@@ -214,6 +214,7 @@ uint32_t encode_zorder(const uint16_t x, const uint16_t y, const uint16_t z){
 }
 */
 
+/*
 __global__
 void concurrent_walk(
     const unsigned voxel_size_,
@@ -305,6 +306,7 @@ void concurrent_walk(
       }
     }
     index += blockDim.x;
+    __syncthreads();
     if(i != 291) {
       vdx[threadIdx.x] = voxels_[index];
     }
@@ -324,12 +326,12 @@ void Diffuser::walk() {
       shift_,
       thrust::raw_pointer_cast(&voxels_[0]));
   cudaDeviceSynchronize();
-  int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
-  std::cout << "val:" << val << std::endl;
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
 }
+*/
 
-/*
-//using shared memory: 10.3 BUPS
+//using shared memory with 1024 threads: 11.3 BUPS
 __global__
 void concurrent_walk(
     const unsigned voxel_size_,
@@ -397,8 +399,8 @@ void concurrent_walk(
     offsets_[46] = NUM_COLROW;
     offsets_[47] = NUM_COLROW+NUM_ROW;
   }
-  volatile __shared__ unsigned vdx[256];
-  volatile __shared__ unsigned tars[256];
+  volatile __shared__ unsigned vdx[1024];
+  volatile __shared__ unsigned tars[1024];
   __syncthreads();
   //index is the unique global thread id (size: total_threads)
   unsigned index(blockIdx.x*blockDim.x + threadIdx.x);
@@ -432,7 +434,7 @@ void concurrent_walk(
 
 void Diffuser::walk() {
   const size_t size(voxels_.size());
-  concurrent_walk<<<blocks_, 256>>>(
+  concurrent_walk<<<blocks_, 1024>>>(
       size,
       stride_,
       id_stride_,
@@ -441,8 +443,10 @@ void Diffuser::walk() {
       shift_,
       thrust::raw_pointer_cast(&voxels_[0]));
   cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
 }
-*/
+
 /*
 //Compressed lattice: 9 BUPS
 __global__
