@@ -281,15 +281,18 @@ void concurrent_walk(
     offsets_[46] = NUM_COLROW;
     offsets_[47] = NUM_COLROW+NUM_ROW;
   }
-  unsigned dx, tar, odd_lay, odd_col, rand;
+  unsigned dx, tar, odd_lay, odd_col, rand, res, cnt;
   const unsigned block_mols(voxel_size_/gridDim.x);
   unsigned index(blockIdx.x*block_mols + threadIdx.x);
   volatile __shared__ unsigned vdx[1024];
+  cnt = block_mols/blockDim.x;
   vdx[threadIdx.x] = voxels_[index];
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   __syncthreads();
-  for(unsigned i(0); i != 292; ++i) { 
-    if(vdx[threadIdx.x]) {
+  for(unsigned i(0); i != cnt; ++i) { 
+    unsigned x(vdx[threadIdx.x]);
+    __syncthreads();
+    if(x) {
       rand = (((uint32_t)((uint16_t)(curand(&local_state) &
                 0x0000FFFFuL))*12) >> 16);
       dx = z2i(vdx[threadIdx.x]);
@@ -298,26 +301,26 @@ void concurrent_walk(
       tar = i2z(mol2_t(dx)+ offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))]);
       dx = tar >> shift_;
       if(dx < voxel_size_) {
-        if(dx >= index && dx < index+blockDim.x) {
-          tar = atomicCAS((unsigned*)&vdx[0]+(dx-index), vac_id_, tar);
+        res = 5;
+        if(dx >= index-threadIdx.x && dx < index-threadIdx.x+blockDim.x) {
+          res = atomicCAS((unsigned*)&vdx[0]+(dx-(index-threadIdx.x)), vac_id_, tar);
         }
         else {
-          tar = atomicCAS(voxels_+dx, vac_id_, tar);
+          res = atomicCAS(voxels_+dx, vac_id_, tar);
         }
-        //tar = atomicCAS(voxels_+dx, vac_id_, tar);
-        if(tar == vac_id_) {
-          vdx[threadIdx.x] = vac_id_;
-          //voxels_[index] = vac_id_;
+        if(res == vac_id_) {
+          atomicExch((unsigned*)&vdx[threadIdx.x], vac_id_);
+          //vdx[threadIdx.x] = vac_id_;
         }
       }
     }
+    __syncthreads();
     voxels_[index] = vdx[threadIdx.x];
     index += blockDim.x;
     __syncthreads();
-    if(i != 291) {
+    if(i < cnt-1) {
       vdx[threadIdx.x] = voxels_[index];
     }
-    __syncthreads();
   }
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
@@ -364,6 +367,10 @@ void Diffuser::walk() {
       shift_,
       thrust::raw_pointer_cast(&voxels_[0]));
   cudaDeviceSynchronize();
+  /*
+  int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  std::cout << "val:" << val << std::endl;
+  */
 }
 
 /*
