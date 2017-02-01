@@ -77,8 +77,8 @@ std::vector<Reaction*>& Species::get_reactions() {
 }
 
 
-struct populate_lattice {
-  __host__ __device__ populate_lattice(
+struct populate_lattice_uniform {
+  __host__ __device__ populate_lattice_uniform(
       const unsigned seed,
       const umol_t mol_size,
       const voxel_t vac_id,
@@ -94,14 +94,18 @@ struct populate_lattice {
   __device__ umol_t operator()(const unsigned n) const {
     thrust::default_random_engine rng(seed_);
     rng.discard(n);
-    thrust::uniform_int_distribution<unsigned> u(0, voxel_size_);
+    thrust::uniform_int_distribution<unsigned> u(0, voxel_size_*WORD);
     unsigned rand(u(rng));
-    voxel_t res(atomicCAS(voxels_+rand, vac_id_, stride_id_+n));
+    voxel_t bor(1 << rand%WORD);
+    unsigned idx(rand/WORD);
+    voxel_t res(atomicOr(voxels_+idx, bor));
     unsigned cnt(0);
-    while(res != vac_id_) {
+    while(res & bor) {
       rng.discard(n+mol_size_*(++cnt));
       rand = u(rng);
-      res = atomicCAS(voxels_+rand, vac_id_, stride_id_+n);
+      bor = 1 << rand%WORD;
+      idx = rand/WORD;
+      res = atomicOr(voxels_+idx, bor);
     }
     return rand;
   }
@@ -113,6 +117,26 @@ struct populate_lattice {
   voxel_t* voxels_;
 };
 
+struct populate_lattice {
+  __host__ __device__ populate_lattice(
+      voxel_t* voxels):
+    voxels_(voxels) {} 
+  __device__ umol_t operator()(const umol_t mol) const {
+    voxel_t bor(1 << mol%WORD);
+    unsigned idx(mol/WORD);
+    voxel_t res(atomicOr(voxels_+idx, bor));
+    /*
+    while(res & or) {
+      or = 1 << mol%WORD;
+      idx = mol/WORD;
+      res = atomicOr(voxels_+idx, or);
+    }
+    */
+    return mol;
+  }
+  voxel_t* voxels_;
+};
+
 
 void Species::populate() {
   mols_.resize(init_nmols_);
@@ -120,7 +144,7 @@ void Species::populate() {
       thrust::counting_iterator<unsigned>(0),
       thrust::counting_iterator<unsigned>(init_nmols_),
       mols_.begin(),
-      populate_lattice(
+      populate_lattice_uniform(
         id_,
         init_nmols_,
         vac_id_,
@@ -132,10 +156,18 @@ void Species::populate() {
 void Species::populate_in_lattice() {
   mols_.resize(host_mols_.size());
   thrust::copy(host_mols_.begin(), host_mols_.end(), mols_.begin());
+  thrust::transform(thrust::device, 
+      mols_.begin(),
+      mols_.end(),
+      mols_.begin(),
+      populate_lattice(thrust::raw_pointer_cast(&voxels_[0])));
+
+  /*
   thrust::permutation_iterator<thrust::device_vector<voxel_t>::iterator,
     thrust::device_vector<umol_t>::iterator> population(
         voxels_.begin(), mols_.begin());
   thrust::fill_n(thrust::device, population, mols_.size(), get_id());
+  */
   if(diffuser_.get_D()) {
     host_mols_.clear();
     std::vector<umol_t>().swap(host_mols_);

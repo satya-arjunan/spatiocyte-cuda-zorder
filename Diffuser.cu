@@ -297,37 +297,24 @@ void concurrent_walk(
     umol_t zval(i2z(val));
     //Atomically put the current molecule id, index+id_stride_ at the target
     //voxel if it is vacant: 
-    voxel_t tar_mol_id(atomicCAS(voxels_+zval, vac_id_, index+id_stride_));
+    voxel_t bor(1 << zval%WORD);
+    unsigned idx(zval/WORD);
+    voxel_t tar_mol_id(atomicOr(voxels_+idx, bor));
     //If not occupied, finalize walk:
-    if(tar_mol_id == vac_id_) {
-      voxels_[zvdx] = vac_id_;
+    if(!(tar_mol_id & bor)) {
+      voxel_t band(~(1 << zvdx%WORD));
+      idx = zvdx/WORD;
+      atomicAnd(voxels_+idx, band);
       mols_[index] = zval;
     }
     index += total_threads;
-    if(index < mol_size_) {
-      rand16 = (uint16_t)(rand32 >> 16);
-      rand = ((uint32_t)rand16*12) >> 16;
-      zvdx = (mols_[index]);
-      vdx = (z2i(zvdx));
-      odd_lay = ((vdx/NUM_COLROW)&1);
-      odd_col = ((vdx%NUM_COLROW/NUM_ROW)&1);
-      val = mol2_t(vdx)+offsets_[rand+(24&(-odd_lay))+(12&(-odd_col))];
-      zval = i2z(val);
-      tar_mol_id = (atomicCAS(voxels_+zval, vac_id_, index+id_stride_));
-      //If not occupied, finalize walk:
-      if(tar_mol_id == vac_id_) {
-        voxels_[zvdx] = vac_id_;
-        mols_[index] = zval;
-      }
-      index += total_threads;
-    }
   }
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
 
 void Diffuser::walk() {
   const size_t size(mols_.size());
-  concurrent_walk<<<32, 256>>>(
+  concurrent_walk<<<blocks_, 1024>>>(
       size,
       stride_,
       id_stride_,

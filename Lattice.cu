@@ -34,7 +34,7 @@
 #include <Compartment.hpp>
 
 Lattice::Lattice(const Vector<unsigned>& dimensions):
-  voxels_(NUM_VOXEL, 0),
+  voxels_(rint(double(NUM_VOXEL)/WORD), 0),
   dimensions_(dimensions) {
 }
 

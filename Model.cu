@@ -55,7 +55,7 @@ void Model::initialize() {
   cudaGetDeviceProperties(&prop, 0);
   //better performance when the number of blocks is twice the number of 
   //multi processors (aka streams):
-  blocks_ = prop.multiProcessorCount*4;
+  blocks_ = prop.multiProcessorCount*2;
   std::cout << "number blocks:" << blocks_ << std::endl;
   /*
   //Ordered from fastest to slowest:
@@ -71,7 +71,7 @@ void Model::initialize() {
 //Setup the default XORWOW generator:
 __global__
 void setup_kernel() {
-  int id = threadIdx.x + blockIdx.x * 256;
+  int id = threadIdx.x + blockIdx.x*blockDim.x;
   if(threadIdx.x == 0) {
     curand_states[blockIdx.x] = 
       (curandState*)malloc(blockDim.x*sizeof(curandState));
@@ -81,7 +81,7 @@ void setup_kernel() {
 }
 
 void Model::initialize_random_generator() {
-  setup_kernel<<<blocks_, 256>>>();
+  setup_kernel<<<blocks_, 1024>>>();
 }
 
 unsigned& Model::get_blocks() {
