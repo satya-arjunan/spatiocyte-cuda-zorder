@@ -52,7 +52,7 @@ Diffuser::Diffuser(const double D, Species& species):
   null_id_(species_.get_model().get_null_id()),
   seed_(0) {
 }
-
+surface<void, cudaSurfaceType1D> surfRef; 
 __device__ __constant__ int offsets[48];
 
 void Diffuser::initialize() {
@@ -67,7 +67,14 @@ void Diffuser::initialize() {
   reacteds_.resize(mols_.size()+1, 0);
   thrust::sort(thrust::device, mols_.begin(), mols_.end());
   cudaMemcpyToSymbol(offsets, thrust::raw_pointer_cast(&offsets_[0]), sizeof(int)*48);
- 
+  cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(8,8,8,8,
+      cudaChannelFormatKindUnsigned);
+  cudaArray* cuArray;
+  cudaMallocArray(&cuArray, &channelDesc, voxels_.size(), 1,
+      cudaArraySurfaceLoadStore);
+  cudaMemcpyToArray(cuInputArray, 0, 0, thrust::raw_pointer_cast(&voxels_[0]),
+      voxels_.size()*sizeof(voxel_t), cudaMemcpyDeviceToDevice);
+  cudaBindSurfaceToArray(surfRef, cuArray);
   std::vector<Reaction*>& reactions(species_.get_reactions());
   for(unsigned i(0); i != reactions.size(); ++i) {
     std::vector<Species*>& substrates(reactions[i]->get_substrates());
