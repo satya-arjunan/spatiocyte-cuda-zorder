@@ -52,7 +52,9 @@ Diffuser::Diffuser(const double D, Species& species):
   null_id_(species_.get_model().get_null_id()),
   seed_(0) {
 }
-surface<void, cudaSurfaceType1D> surfRef; 
+
+surface<void, cudaSurfaceType1D> surfRef1; 
+//surface<void, cudaSurfaceType1D> surfRef2; 
 __device__ __constant__ int offsets[48];
 
 void Diffuser::initialize() {
@@ -65,16 +67,34 @@ void Diffuser::initialize() {
   substrate_mols_.resize(model.get_species().size(), NULL);
   product_mols_.resize(model.get_species().size(), NULL);
   reacteds_.resize(mols_.size()+1, 0);
-  thrust::sort(thrust::device, mols_.begin(), mols_.end());
-  cudaMemcpyToSymbol(offsets, thrust::raw_pointer_cast(&offsets_[0]), sizeof(int)*48);
-  cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(8,8,8,8,
-      cudaChannelFormatKindUnsigned);
-  cudaArray* cuArray;
-  cudaMallocArray(&cuArray, &channelDesc, voxels_.size(), 1,
-      cudaArraySurfaceLoadStore);
-  cudaMemcpyToArray(cuInputArray, 0, 0, thrust::raw_pointer_cast(&voxels_[0]),
-      voxels_.size()*sizeof(voxel_t), cudaMemcpyDeviceToDevice);
-  cudaBindSurfaceToArray(surfRef, cuArray);
+  int att;
+  CUdevice device;
+  cuDeviceGet(&device, 0);
+  //cuDeviceGetAttribute(&att, CU_DEVICE_ATTRIBUTE_MAXIMUM_SURFACE2D_HEIGHT, device);
+  cuDeviceGetAttribute(&att, CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE1D_LINEAR_WIDTH, device);
+  std::cout << "1D texture linear width:" << att << std::endl;
+  //thrust::sort(thrust::device, mols_.begin(), mols_.end());
+  cudaMemcpyToSymbol(offsets, thrust::raw_pointer_cast(&offsets_[0]),
+      sizeof(int)*48);
+
+  int N(voxels_.size());
+  voxel_t* buffer;
+  cudaMalloc(&buffer, N*sizeof(voxel_t));
+  cudaMemcpy(buffer, thrust::raw_pointer_cast(&voxels_[0]), 
+      N*sizeof(voxel_t),cudaMemcpyDefault);
+
+  cudaResourceDesc resDesc;
+  memset(&resDesc, 0, sizeof(resDesc));
+  resDesc.resType = cudaResourceTypeLinear;
+  resDesc.res.linear.devPtr = buffer;
+  resDesc.res.linear.desc.f = cudaChannelFormatKindUnsigned;
+  resDesc.res.linear.desc.x = 32; // bits per channel
+  resDesc.res.linear.sizeInBytes = N*sizeof(voxel_t);
+  cudaTextureDesc texDesc;
+  memset(&texDesc, 0, sizeof(texDesc));
+  texDesc.readMode = cudaReadModeElementType;
+  cudaCreateTextureObject(&texture_, &resDesc, &texDesc, NULL);
+
   std::vector<Reaction*>& reactions(species_.get_reactions());
   for(unsigned i(0); i != reactions.size(); ++i) {
     std::vector<Species*>& substrates(reactions[i]->get_substrates());
@@ -111,6 +131,7 @@ double Diffuser::get_D() const {
 //mol = y + x*rows + z*cols*rows
 //Zorder convention:
 //encode[z + y*rows + x*cols*rows]
+
 __device__
 void i2zorder_xyz(const umol_t mol, humol_t& zx, humol_t& zy,
     humol_t& zz) {
@@ -192,6 +213,182 @@ void concurrent_walk(
     const voxel_t vac_id_,
     const voxel_t null_id_,
     const unsigned shift_,
+    cudaTextureObject_t tex_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt;
+  voxel_t vdx, tar, dxv, dx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    vdx = tex1Dfetch<voxel_t>(tex_, index);
+    if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      vdx = z2i(vdx);
+      odd_lay = ((vdx/NUM_COLROW)&1);
+      odd_col = ((vdx%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(vdx)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      dxv = tex1Dfetch<voxel_t>(tex_, dx);
+      /*
+      if(!dxv) {
+        voxels_[dx] = tar;
+      }
+      */
+    }
+    __syncthreads();
+    /*
+    if(voxels_[dx] != tar) {
+      voxels_[index] = vdx;
+    }
+    __syncthreads();
+    */
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  const size_t size(voxels_.size());
+  concurrent_walk<<<blocks_, 1024>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      texture_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+
+/*
+//1D texture fetch twice, no writes: 41 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    cudaTextureObject_t tex_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt;
+  voxel_t vdx, tar, dxv, dx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    vdx = tex1Dfetch<voxel_t>(tex_, index);
+    if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      vdx = z2i(vdx);
+      odd_lay = ((vdx/NUM_COLROW)&1);
+      odd_col = ((vdx%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(vdx)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      dxv = tex1Dfetch<voxel_t>(tex_, dx);
+    }
+    __syncthreads();
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  const size_t size(voxels_.size());
+  concurrent_walk<<<blocks_, 1024>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      texture_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+*/
+
+
+/*
+//No bugs: 9.6 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand,  cnt, res;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  volatile __shared__ unsigned tars[1024];
+  volatile __shared__ unsigned vdx[1024];
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    vdx[threadIdx.x] = voxels_[index];
+    if(vdx[threadIdx.x]) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      vdx[threadIdx.x] = z2i(vdx[threadIdx.x]);
+      odd_lay = ((vdx[threadIdx.x]/NUM_COLROW)&1);
+      odd_col = ((vdx[threadIdx.x]%NUM_COLROW/NUM_ROW)&1);
+      tars[threadIdx.x] = i2z(mol2_t(vdx[threadIdx.x])+ 
+          offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      vdx[threadIdx.x] = tars[threadIdx.x] >> shift_;
+      res = atomicCAS(voxels_+vdx[threadIdx.x], vac_id_, tars[threadIdx.x]);
+      if(res == vac_id_) {
+        atomicExch(voxels_+index, vac_id_);
+      }
+    }
+    index += blockDim.x;
+    __syncthreads();
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  const size_t size(voxels_.size());
+  concurrent_walk<<<blocks_, 1024>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+*/
+
+/*
+//With bugs coalesced write: 13.3 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
     voxel_t* voxels_) {
   unsigned dx, tar, odd_lay, odd_col, rand, res, cnt;
   const unsigned block_mols(voxel_size_/gridDim.x);
@@ -251,6 +448,7 @@ void Diffuser::walk() {
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
+*/
 
 
 /*

@@ -59,6 +59,7 @@ private:
   voxel_t stride_;
   voxel_t id_stride_;
   unsigned shift_;
+  cudaTextureObject_t texture_;
   thrust::device_vector<bool> is_reactive_;
   thrust::device_vector<Reaction*> reactions_;
   thrust::device_vector<umol_t> reacteds_;

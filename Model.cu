@@ -59,7 +59,7 @@ void Model::initialize() {
   blocks_ = prop.multiProcessorCount*2;
   std::cout << "number blocks:" << blocks_ << " shared memory (K):" <<
     prop.sharedMemPerBlock/1024 << " maxThreadsPerBlock:" << 
-    prop.maxThreadsPerBlock << std::endl;
+    prop.maxThreadsPerBlock << " warpSize:" << prop.warpSize << std::endl;
   /*
   //Ordered from fastest to slowest:
   curandCreateGenerator(&random_generator_, CURAND_RNG_PSEUDO_XORWOW);
