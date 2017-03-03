@@ -33,6 +33,8 @@
 #include <thrust/random.h>
 #include <thrust/system/cuda/detail/bulk/bulk.hpp>
 #include <curand_kernel.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include <Diffuser.hpp>
 #include <Compartment.hpp>
 #include <Model.hpp>
@@ -53,9 +55,20 @@ Diffuser::Diffuser(const double D, Species& species):
   seed_(0) {
 }
 
-surface<void, cudaSurfaceType1D> surfRef1; 
-//surface<void, cudaSurfaceType1D> surfRef2; 
 __device__ __constant__ int offsets[48];
+
+void CUDA_SAFE_CALL(cudaError_t call, int line) {
+    switch (call) {
+    case cudaSuccess:
+        break;
+    default:
+        printf("ERROR at line :%i.%d' ' %s\n",
+            line, call, cudaGetErrorString(call));
+        exit(-1);
+        break;
+    }
+
+}
 
 void Diffuser::initialize() {
   Model& model(species_.get_model());
@@ -70,14 +83,36 @@ void Diffuser::initialize() {
   int att;
   CUdevice device;
   cuDeviceGet(&device, 0);
-  //cuDeviceGetAttribute(&att, CU_DEVICE_ATTRIBUTE_MAXIMUM_SURFACE2D_HEIGHT, device);
-  cuDeviceGetAttribute(&att, CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE1D_LINEAR_WIDTH, device);
+  cuDeviceGetAttribute(&att, CU_DEVICE_ATTRIBUTE_MAXIMUM_SURFACE2D_HEIGHT, device);
+  //cuDeviceGetAttribute(&att, CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE1D_LINEAR_WIDTH, device);
   std::cout << "1D texture linear width:" << att << std::endl;
   //thrust::sort(thrust::device, mols_.begin(), mols_.end());
   cudaMemcpyToSymbol(offsets, thrust::raw_pointer_cast(&offsets_[0]),
       sizeof(int)*48);
 
-  int N(voxels_.size());
+  int N(12952);
+  int s(voxels_.size()*sizeof(voxel_t));
+  channelDesc = cudaCreateChannelDesc<voxel_t>();
+  cudaDeviceSynchronize();
+  CUDA_SAFE_CALL(cudaMallocArray(&rbuffer_, &channelDesc, N, N,
+        cudaArraySurfaceLoadStore), __LINE__);
+  CUDA_SAFE_CALL(cudaMemcpyToArray(rbuffer_, 0, 0,
+        thrust::raw_pointer_cast(&voxels_[0]), s,
+        cudaMemcpyDeviceToDevice), __LINE__);
+  memset(&rres_, 0, sizeof(cudaResourceDesc));
+  rres_.resType = cudaResourceTypeArray;
+  rres_.res.array.array = rbuffer_;
+  cudaCreateSurfaceObject(&rsurface_, &rres_);
+
+
+  CUDA_SAFE_CALL(cudaMallocArray(&wbuffer_, &channelDesc, N, N,
+        cudaArraySurfaceLoadStore), __LINE__);
+  memset(&wres_, 0, sizeof(cudaResourceDesc));
+  wres_.resType = cudaResourceTypeArray;
+  wres_.res.array.array = wbuffer_;
+  cudaCreateSurfaceObject(&wsurface_, &wres_);
+
+  /*
   voxel_t* buffer;
   cudaMalloc(&buffer, N*sizeof(voxel_t));
   cudaMemcpy(buffer, thrust::raw_pointer_cast(&voxels_[0]), 
@@ -87,13 +122,36 @@ void Diffuser::initialize() {
   memset(&resDesc, 0, sizeof(resDesc));
   resDesc.resType = cudaResourceTypeLinear;
   resDesc.res.linear.devPtr = buffer;
-  resDesc.res.linear.desc.f = cudaChannelFormatKindUnsigned;
-  resDesc.res.linear.desc.x = 32; // bits per channel
+  resDesc.res.linear.desc = cudaCreateChannelDesc<voxel_t>();
   resDesc.res.linear.sizeInBytes = N*sizeof(voxel_t);
   cudaTextureDesc texDesc;
   memset(&texDesc, 0, sizeof(texDesc));
   texDesc.readMode = cudaReadModeElementType;
   cudaCreateTextureObject(&texture_, &resDesc, &texDesc, NULL);
+  */
+
+  /*
+  cudaExtent extent = make_cudaExtent(1024*sizeof(float), 1024, 1);
+  cudaPitchedPtr devPitchedPtr;
+  cudaMalloc3D(&devPitchedPtr, extent);
+  */
+
+  /*
+  int width(40960);
+  int height(4096);
+  voxel_t* pbuffer;
+  size_t pitch;
+  cudaMallocPitch(&pbuffer, &pitch, sizeof(voxel_t)*width, height);
+  cudaResourceDesc surfRes;
+  memset(&surfRes, 0, sizeof(cudaResourceDesc));
+  surfRes.resType = cudaResourceTypePitch2D;
+  surfRes.res.pitch2D.desc = cudaCreateChannelDesc<voxel_t>();
+  surfRes.res.pitch2D.devPtr = pbuffer;
+  surfRes.res.pitch2D.height = height;
+  surfRes.res.pitch2D.pitchInBytes = pitch;
+  surfRes.res.pitch2D.width = width;
+  cudaCreateSurfaceObject(&surface_, &surfRes);
+  */
 
   std::vector<Reaction*>& reactions(species_.get_reactions());
   for(unsigned i(0); i != reactions.size(); ++i) {
@@ -204,6 +262,129 @@ umol_t z2i(const umol_t zval) {
   return zorder_xyz2i(x, y, z);
 }
 
+//2D surface object read twice, write once: 7.77 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    cudaSurfaceObject_t rsurface_,
+    cudaSurfaceObject_t wsurface_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt;
+  voxel_t vdx, tar, dxv, dx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    //vdx = tex1Dfetch<voxel_t>(tex_, index);
+    int x(index/12952);
+    int y(index%12952);
+    surf2Dread(&vdx, rsurface_, (x)*sizeof(voxel_t), y);
+    rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+              0x0000FFFFuL))*12) >> 16);
+    dxv = z2i(vdx);
+    odd_lay = ((dxv/NUM_COLROW)&1);
+    odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+    tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+    dx = tar >> shift_;
+    //dxv = tex1Dfetch<voxel_t>(tex_, dx);
+    x = dx/12952;
+    y = dx%12952;
+    surf2Dread(&dxv, rsurface_, (x)*sizeof(voxel_t), y);
+    surf2Dwrite(tar, wsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+    __syncthreads();
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  //const size_t size(voxels_.size());
+  const size_t size(9977856);
+  concurrent_walk<<<blocks_, 1024>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      rsurface_,
+      wsurface_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+
+/*
+//2D surface object read twice, write once: 7.77 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    cudaSurfaceObject_t rsurface_,
+    cudaSurfaceObject_t wsurface_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt;
+  voxel_t vdx, tar, dxv, dx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    //vdx = tex1Dfetch<voxel_t>(tex_, index);
+    int x(index/12952);
+    int y(index%12952);
+    surf2Dread(&vdx, rsurface_, (x)*sizeof(voxel_t), y);
+    rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+              0x0000FFFFuL))*12) >> 16);
+    dxv = z2i(vdx);
+    odd_lay = ((dxv/NUM_COLROW)&1);
+    odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+    tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+    dx = tar >> shift_;
+    //dxv = tex1Dfetch<voxel_t>(tex_, dx);
+    x = dx/12952;
+    y = dx%12952;
+    surf2Dread(&dxv, rsurface_, (x)*sizeof(voxel_t), y);
+    surf2Dwrite(tar, wsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+    __syncthreads();
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  //const size_t size(voxels_.size());
+  const size_t size(9977856);
+  concurrent_walk<<<blocks_, 1024>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      rsurface_,
+      wsurface_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+*/
+
+/*
 //1D texture fetch twice, no writes: 160 BUPS
 __global__
 void concurrent_walk(
@@ -233,6 +414,7 @@ void concurrent_walk(
       tar = i2z(mol2_t(vdx)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
       dx = tar >> shift_;
       vdx = tex1Dfetch<voxel_t>(tex_, dx);
+      //voxels_[dx] = tar;
     //}
     __syncthreads();
     index += blockDim.x;
@@ -255,6 +437,7 @@ void Diffuser::walk() {
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
+*/
 
 
 /*

@@ -59,7 +59,13 @@ private:
   voxel_t stride_;
   voxel_t id_stride_;
   unsigned shift_;
-  cudaTextureObject_t texture_;
+  cudaArray* rbuffer_;
+  cudaArray* wbuffer_;
+  cudaChannelFormatDesc channelDesc;
+  cudaResourceDesc rres_;
+  cudaResourceDesc wres_;
+  cudaSurfaceObject_t rsurface_;
+  cudaSurfaceObject_t wsurface_;
   thrust::device_vector<bool> is_reactive_;
   thrust::device_vector<Reaction*> reactions_;
   thrust::device_vector<umol_t> reacteds_;
