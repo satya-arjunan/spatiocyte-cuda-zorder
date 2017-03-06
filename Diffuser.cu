@@ -262,7 +262,7 @@ umol_t z2i(const umol_t zval) {
   return zorder_xyz2i(x, y, z);
 }
 
-//2D surface object read twice, write once: 7.77 BUPS
+//2D surface object read twice, write twice: 6.55 BUPS
 __global__
 void concurrent_walk(
     const unsigned voxel_size_,
@@ -282,22 +282,19 @@ void concurrent_walk(
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   __syncthreads();
   for(unsigned i(0); i != cnt; ++i) { 
-    //vdx = tex1Dfetch<voxel_t>(tex_, index);
-    int x(index/12952);
-    int y(index%12952);
-    surf2Dread(&vdx, rsurface_, (x)*sizeof(voxel_t), y);
-    rand = (((uint32_t)((uint16_t)(curand(&local_state) &
-              0x0000FFFFuL))*12) >> 16);
-    dxv = z2i(vdx);
-    odd_lay = ((dxv/NUM_COLROW)&1);
-    odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
-    tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
-    dx = tar >> shift_;
-    //dxv = tex1Dfetch<voxel_t>(tex_, dx);
-    x = dx/12952;
-    y = dx%12952;
-    surf2Dread(&dxv, rsurface_, (x)*sizeof(voxel_t), y);
-    surf2Dwrite(tar, wsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+    surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+    //if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      dxv = z2i(vdx);
+      odd_lay = ((dxv/NUM_COLROW)&1);
+      odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      surf2Dread(&dxv, rsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+      surf2Dwrite(tar, rsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+      surf2Dwrite(vac_id_, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+    //}
     __syncthreads();
     index += blockDim.x;
   }
