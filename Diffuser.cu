@@ -105,12 +105,14 @@ void Diffuser::initialize() {
   cudaCreateSurfaceObject(&rsurface_, &rres_);
 
 
+  /*
   CUDA_SAFE_CALL(cudaMallocArray(&wbuffer_, &channelDesc, N, N,
         cudaArraySurfaceLoadStore), __LINE__);
   memset(&wres_, 0, sizeof(cudaResourceDesc));
   wres_.resType = cudaResourceTypeArray;
   wres_.res.array.array = wbuffer_;
   cudaCreateSurfaceObject(&wsurface_, &wres_);
+  */
 
   /*
   voxel_t* buffer;
@@ -350,7 +352,7 @@ __device__ __forceinline__ bool warpHasCollision(T val) {
   return (__any(dup) != 0);
 }
 
-//With warp collision check, surface object read twice, write twice: 16.6 BUPS
+//Global memory with warp collision check replacing atomics: 11.3 BUPS
 __global__
 void concurrent_walk(
     const unsigned voxel_size_,
@@ -359,43 +361,39 @@ void concurrent_walk(
     const voxel_t vac_id_,
     const voxel_t null_id_,
     const unsigned shift_,
-    cudaSurfaceObject_t rsurface_,
-    cudaSurfaceObject_t wsurface_,
     voxel_t* voxels_) {
-  unsigned odd_lay, odd_col, rand, cnt;
-  voxel_t vdx, tar, dxv, dx;
+  unsigned odd_lay, odd_col, rand,  cnt, tar, vdx;
   const unsigned block_mols(voxel_size_/gridDim.x);
   unsigned index(blockIdx.x*block_mols + threadIdx.x);
   cnt = block_mols/blockDim.x;
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   __syncthreads();
   for(unsigned i(0); i != cnt; ++i) { 
-    surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
-    //if(vdx) {
+    vdx = voxels_[index];
+    if(vdx) {
       rand = (((uint32_t)((uint16_t)(curand(&local_state) &
                 0x0000FFFFuL))*12) >> 16);
-      dxv = z2i(vdx);
-      odd_lay = ((dxv/NUM_COLROW)&1);
-      odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
-      tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
-      dx = tar >> shift_;
-      if(!warpHasCollision(dx)) {
-        surf2Dread(&dxv, rsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
-        if(dxv == vac_id_) {
-          surf2Dwrite(tar, rsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
-          surf2Dwrite(vac_id_, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+      vdx = z2i(vdx);
+      odd_lay = ((vdx/NUM_COLROW)&1);
+      odd_col = ((vdx%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(vdx)+ 
+          offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      vdx = tar >> shift_;
+      if(!warpHasCollision(vdx)) {
+        if(voxels_[vdx] == vac_id_) {
+          voxels_[vdx] = tar;
+          voxels_[index] = vac_id_;
         }
       }
-    //}
-    __syncthreads();
+    }
     index += blockDim.x;
+    __syncthreads();
   }
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
 
 void Diffuser::walk() {
-  //const size_t size(voxels_.size());
-  const size_t size(9977856);
+  const size_t size(voxels_.size());
   concurrent_walk<<<blocks_, 32>>>(
       size,
       stride_,
@@ -403,8 +401,6 @@ void Diffuser::walk() {
       vac_id_,
       null_id_,
       shift_,
-      rsurface_,
-      wsurface_,
       thrust::raw_pointer_cast(&voxels_[0]));
   cudaDeviceSynchronize();
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
@@ -433,7 +429,7 @@ void concurrent_walk(
   __syncthreads();
   for(unsigned i(0); i != cnt; ++i) { 
     surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
-    //if(vdx) {
+    if(vdx) {
       rand = (((uint32_t)((uint16_t)(curand(&local_state) &
                 0x0000FFFFuL))*12) >> 16);
       dxv = z2i(vdx);
@@ -448,7 +444,7 @@ void concurrent_walk(
           surf2Dwrite(vac_id_, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
         }
       }
-    //}
+    }
     __syncthreads();
     index += blockDim.x;
   }
@@ -469,6 +465,8 @@ void Diffuser::walk() {
       wsurface_,
       thrust::raw_pointer_cast(&voxels_[0]));
   cudaDeviceSynchronize();
+  //cudaMemcpyFromArray(thrust::raw_pointer_cast(&voxels_[0]), rbuffer_, 0, 0, voxels_.size()*sizeof(voxel_t), cudaMemcpyDeviceToDevice);
+  //cudaDeviceSynchronize();
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
