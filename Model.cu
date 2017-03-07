@@ -56,7 +56,7 @@ void Model::initialize() {
   //better performance when the number of blocks is twice the number of 
   //multi processors (aka streams):
   //blocks_ = prop.multiProcessorCount*2;
-  blocks_ = prop.multiProcessorCount*2;
+  blocks_ = prop.multiProcessorCount*2*32;
   std::cout << "number blocks:" << blocks_ << " shared memory (K):" <<
     prop.sharedMemPerBlock/1024 << " maxThreadsPerBlock:" << 
     prop.maxThreadsPerBlock << " warpSize:" << prop.warpSize << std::endl;
@@ -84,7 +84,7 @@ void setup_kernel() {
 }
 
 void Model::initialize_random_generator() {
-  setup_kernel<<<blocks_, 1024>>>();
+  setup_kernel<<<blocks_, 32>>>();
 }
 
 unsigned& Model::get_blocks() {
