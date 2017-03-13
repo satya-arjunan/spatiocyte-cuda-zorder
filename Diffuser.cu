@@ -284,9 +284,55 @@ struct LessThan {
   }
 };
 
+template <typename K, typename V>
+struct Pair {
+  __host__ __device__ __forceinline__ Pair() {
+  }
+
+  __host__ __device__ __forceinline__ Pair(K key, V value)
+      : k(key), v(value) {
+  }
+
+  __host__ __device__ __forceinline__ bool
+  operator==(const Pair<K, V>& rhs) const {
+    return (k == rhs.k) && (v == rhs.v);
+  }
+
+  __host__ __device__ __forceinline__ bool
+  operator!=(const Pair<K, V>& rhs) const {
+    return !operator==(rhs);
+  }
+
+  __host__ __device__ __forceinline__ bool
+  operator<(const Pair<K, V>& rhs) const {
+    return (k < rhs.k) || ((k == rhs.k) && (v < rhs.v));
+  }
+
+  __host__ __device__ __forceinline__ bool
+  operator>(const Pair<K, V>& rhs) const {
+    return (k > rhs.k) || ((k == rhs.k) && (v > rhs.v));
+  }
+
+  K k;
+  V v;
+};
+
+template <typename T>
+__device__ __forceinline__ T
+shfl_xor(const T val, int laneMask, int width = 32) {
+  return __shfl_xor(val, laneMask, width);
+}
+
+template <typename K, typename V>
+__device__ __forceinline__ Pair<K, V>
+shfl_xor(const Pair<K, V>& p, int laneMask, int width = 32) {
+  return Pair<K, V>(__shfl_xor(p.k, laneMask, width),
+                    __shfl_xor(p.v, laneMask, width));
+}
+
 template <typename T, typename Comparator>
 __device__ __forceinline__ T shflSwap(const T x, int mask, int dir) {
-  T y = __shfl_xor(x, mask);
+  T y = shfl_xor(x, mask);
   return Comparator::compare(x, y) == dir ? y : x;
 }
 
@@ -336,12 +382,30 @@ __device__ T warpBitonicSort(T val) {
   return val;
 }
 
+
+__device__ __forceinline__ constexpr int getMSB(int val) {
+  return
+    ((val >= 1024 && val < 2048) ? 10 :
+     ((val >= 512) ? 9 :
+      ((val >= 256) ? 8 :
+       ((val >= 128) ? 7 :
+        ((val >= 64) ? 6 :
+         ((val >= 32) ? 5 :
+          ((val >= 16) ? 4 :
+           ((val >= 8) ? 3 :
+            ((val >= 4) ? 2 :
+             ((val >= 2) ? 1 :
+              ((val == 1) ? 0 : -1)))))))))));
+}
+
+
+/// Determine if two warp threads have the same value (a collision).
 template <typename T>
 __device__ __forceinline__ bool warpHasCollision(T val) {
   // -sort all values
   // -compare our lower neighbor's value against ourselves (excepting
   //  the first lane)
-  // -if any lane as a difference of 0, there is a duplicate
+  // -if any lane has a difference of 0, there is a duplicate
   //  (excepting the first lane)
   val = warpBitonicSort<T, LessThan<T> >(val);
   const T lower = __shfl_up(val, 1);
@@ -352,6 +416,184 @@ __device__ __forceinline__ bool warpHasCollision(T val) {
   return (__any(dup) != 0);
 }
 
+
+/// Determine if two warp threads have the same value (a collision),
+/// and returns a bitmask of the lanes that are known to collide with
+/// other lanes. Not all lanes that are mutually colliding return a
+/// bit; all lanes with a `1` bit are guaranteed to collide with a
+/// lane with a `0` bit, so the mask can be used to serialize
+/// execution for lanes that collide with others.
+/// (mask | (mask >> 1)) will yield all mutually colliding lanes.
+template <typename T>
+__device__ __forceinline__ unsigned int warpCollisionMask(T val) {
+  // -sort all (lane, value) pairs on value
+  // -compare our lower neighbor's value against ourselves (excepting
+  //  the first lane)
+  // -if any lane as a difference of 0, there is a duplicate
+  //  (excepting the first lane)
+  // -shuffle sort (originating lane, dup) pairs back to the original
+  //  lane and report
+  Pair<T, int> pVal(val, getLaneId());
+  pVal = warpBitonicSort<Pair<T, int>, LessThan<Pair<T, int> > >(pVal);
+
+  // If our neighbor is the same as us, we know our thread's value is
+  // duplicated. All except for lane 0, since shfl will present its
+  // own value (and if lane 0's value is duplicated, lane 1 will pick
+  // that up)
+  const unsigned long lower = __shfl_up(pVal.k, 1);
+  Pair<int, bool> dup(pVal.v,
+                      (lower == pVal.k) && (getLaneId() != 0));
+
+  // Sort back based on lane ID so each thread originally knows
+  // whether or not it duplicated
+  dup = warpBitonicSort<Pair<int, bool>,
+                        LessThan<Pair<int, bool> > >(dup);
+  return __ballot(dup.v);
+}
+
+
+//shfl_down warp collision check: 14.7 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    cudaSurfaceObject_t rsurface_,
+    cudaSurfaceObject_t wsurface_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt, mask, nmask, collide, active;
+  voxel_t vdx, tar, dxv, dx, mydx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  //int laneId = threadIdx.x & 0x1f;
+  int laneId = getLaneId();
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) {
+    surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+    if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      dxv = z2i(vdx);
+      odd_lay = ((dxv/NUM_COLROW)&1);
+      odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      mydx = dx;
+      collide = 0;
+      active = __ballot(1);
+      for (int j(1); j <= 16; ++j) {
+        dx = __shfl_down(dx, 1);
+        if((laneId+j)%32&active && dx==mydx) {
+          collide = 1;
+        }
+      }
+      if(!collide) {
+        surf2Dread(&dxv, rsurface_, (mydx%12952)*sizeof(voxel_t), mydx/12952);
+        if(dxv == vac_id_) {
+          surf2Dwrite(tar, rsurface_, (mydx%12952)*sizeof(voxel_t), mydx/12952);
+          surf2Dwrite(vac_id_, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+        }
+      }
+    }
+    __syncthreads();
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  //const size_t size(voxels_.size());
+  const size_t size(9977856);
+  concurrent_walk<<<blocks_, 32>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      rsurface_,
+      wsurface_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //cudaMemcpyFromArray(thrust::raw_pointer_cast(&voxels_[0]), rbuffer_, 0, 0, voxels_.size()*sizeof(voxel_t), cudaMemcpyDeviceToDevice);
+  //cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+
+/*
+//Correct warp collision check: 1.19 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    cudaSurfaceObject_t rsurface_,
+    cudaSurfaceObject_t wsurface_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt, mask, nmask;
+  voxel_t vdx, tar, dxv, dx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+    if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      dxv = z2i(vdx);
+      odd_lay = ((dxv/NUM_COLROW)&1);
+      odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      mask = warpCollisionMask(dx);
+      nmask = mask | (mask >> 1);
+      if(!getBit(nmask, getLaneId())) {
+        surf2Dread(&dxv, rsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+        if(dxv == vac_id_) {
+          surf2Dwrite(tar, rsurface_, (dx%12952)*sizeof(voxel_t), dx/12952);
+          surf2Dwrite(vac_id_, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+        }
+      }
+    }
+    __syncthreads();
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  //const size_t size(voxels_.size());
+  const size_t size(9977856);
+  concurrent_walk<<<blocks_, 32>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      rsurface_,
+      wsurface_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //cudaMemcpyFromArray(thrust::raw_pointer_cast(&voxels_[0]), rbuffer_, 0, 0, voxels_.size()*sizeof(voxel_t), cudaMemcpyDeviceToDevice);
+  //cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+*/
+
+/*
 //Global memory with warp collision check replacing atomics: 11.3 BUPS
 __global__
 void concurrent_walk(
@@ -362,7 +604,7 @@ void concurrent_walk(
     const voxel_t null_id_,
     const unsigned shift_,
     voxel_t* voxels_) {
-  unsigned odd_lay, odd_col, rand,  cnt, tar, vdx;
+  unsigned odd_lay, odd_col, rand,  cnt, tar, vdx, mask;
   const unsigned block_mols(voxel_size_/gridDim.x);
   unsigned index(blockIdx.x*block_mols + threadIdx.x);
   cnt = block_mols/blockDim.x;
@@ -379,7 +621,7 @@ void concurrent_walk(
       tar = i2z(mol2_t(vdx)+ 
           offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
       vdx = tar >> shift_;
-      if(!warpHasCollision(vdx)) {
+      if(!warpHasCollision(vdx)) { 
         if(voxels_[vdx] == vac_id_) {
           voxels_[vdx] = tar;
           voxels_[index] = vac_id_;
@@ -406,6 +648,7 @@ void Diffuser::walk() {
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
+*/
 
 /*
 //With warp collision check, surface object read twice, write twice: 16.6 BUPS
