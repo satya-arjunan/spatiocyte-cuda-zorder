@@ -452,6 +452,79 @@ __device__ __forceinline__ unsigned int warpCollisionMask(T val) {
 }
 
 
+//Global memory with shfl_down warp collision and atomic check: 5.93 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand,  cnt, tar, vdx, mask, mydx, collide, active;
+  unsigned res;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  int laneId = getLaneId();
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) { 
+    vdx = voxels_[index];
+    if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      vdx = z2i(vdx);
+      odd_lay = ((vdx/NUM_COLROW)&1);
+      odd_col = ((vdx%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(vdx)+ 
+          offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      vdx = tar >> shift_;
+      mydx = vdx;
+      collide = 0;
+      active = __ballot(1);
+      for (int j(1); j <= 16; ++j) {
+        vdx = __shfl_down(vdx, 1);
+        if((laneId+j)%32&active && vdx==mydx) {
+          collide = 1;
+        }
+      }
+      if(!collide) {
+        res = atomicCAS(voxels_+mydx, vac_id_, tar);
+        if(res == vac_id_) {
+          atomicExch(voxels_+index, vac_id_);
+        }
+        /*
+        if(voxels_[mydx] == vac_id_) {
+          voxels_[mydx] = tar;
+          voxels_[index] = vac_id_;
+        }
+        */
+      }
+    }
+    index += blockDim.x;
+    __syncthreads();
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+
+void Diffuser::walk() {
+  const size_t size(voxels_.size());
+  concurrent_walk<<<blocks_, 32>>>(
+      size,
+      stride_,
+      id_stride_,
+      vac_id_,
+      null_id_,
+      shift_,
+      thrust::raw_pointer_cast(&voxels_[0]));
+  cudaDeviceSynchronize();
+  //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
+  //std::cout << "val:" << val << std::endl;
+}
+
+/*
 //shfl_down warp collision check: 14.7 BUPS
 __global__
 void concurrent_walk(
@@ -525,6 +598,7 @@ void Diffuser::walk() {
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
+*/
 
 /*
 //Correct warp collision check: 1.19 BUPS
