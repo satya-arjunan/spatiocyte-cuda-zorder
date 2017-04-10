@@ -105,14 +105,12 @@ void Diffuser::initialize() {
   cudaCreateSurfaceObject(&rsurface_, &rres_);
 
 
-  /*
   CUDA_SAFE_CALL(cudaMallocArray(&wbuffer_, &channelDesc, N, N,
         cudaArraySurfaceLoadStore), __LINE__);
   memset(&wres_, 0, sizeof(cudaResourceDesc));
   wres_.resType = cudaResourceTypeArray;
   wres_.res.array.array = wbuffer_;
   cudaCreateSurfaceObject(&wsurface_, &wres_);
-  */
 
   /*
   voxel_t* buffer;
@@ -451,8 +449,7 @@ __device__ __forceinline__ unsigned int warpCollisionMask(T val) {
   return __ballot(dup.v);
 }
 
-
-//Global memory with shfl_down warp collision and no atomic check: 12.79 BUPS
+//shfl_down warp collision check with distinct read and write surfaces: 5.76 BUPS
 __global__
 void concurrent_walk(
     const unsigned voxel_size_,
@@ -461,50 +458,54 @@ void concurrent_walk(
     const voxel_t vac_id_,
     const voxel_t null_id_,
     const unsigned shift_,
+    cudaSurfaceObject_t rsurface_,
+    cudaSurfaceObject_t wsurface_,
     voxel_t* voxels_) {
-  unsigned odd_lay, odd_col, rand,  cnt, tar, vdx, mask, mydx, collide, active;
-  unsigned res;
+  unsigned odd_lay, odd_col, rand, cnt, mask, nmask, collide, active;
+  voxel_t vdx, tar, dxv, dx, mydx;
   const unsigned block_mols(voxel_size_/gridDim.x);
   unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  //int laneId = threadIdx.x & 0x1f;
   int laneId = getLaneId();
   cnt = block_mols/blockDim.x;
   curandState local_state = curand_states[blockIdx.x][threadIdx.x];
   __syncthreads();
-  for(unsigned i(0); i != cnt; ++i) { 
-    vdx = voxels_[index];
+  for(unsigned i(0); i != cnt; ++i) {
+    surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
     if(vdx) {
       rand = (((uint32_t)((uint16_t)(curand(&local_state) &
                 0x0000FFFFuL))*12) >> 16);
-      vdx = z2i(vdx);
-      odd_lay = ((vdx/NUM_COLROW)&1);
-      odd_col = ((vdx%NUM_COLROW/NUM_ROW)&1);
-      tar = i2z(mol2_t(vdx)+ 
-          offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
-      vdx = tar >> shift_;
-      mydx = vdx;
+      dxv = z2i(vdx);
+      odd_lay = ((dxv/NUM_COLROW)&1);
+      odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      mydx = dx;
       collide = 0;
       active = __ballot(1);
       for (int j(1); j <= 16; ++j) {
-        vdx = __shfl_down(vdx, 1);
-        if((laneId+j)%32&active && vdx==mydx) {
+        dx = __shfl_down(dx, 1);
+        if((laneId+j)%32&active && dx==mydx) {
           collide = 1;
         }
       }
       if(!collide) {
-        if(voxels_[mydx] == vac_id_) {
-          voxels_[mydx] = tar;
-          voxels_[index] = vac_id_;
+        surf2Dread(&dxv, rsurface_, (mydx%12952)*sizeof(voxel_t), mydx/12952);
+        if(dxv == vac_id_) {
+          surf2Dwrite(tar, wsurface_, (mydx%12952)*sizeof(voxel_t), mydx/12952);
+          surf2Dwrite(vac_id_, wsurface_, (index%12952)*sizeof(voxel_t), index/12952);
         }
       }
     }
-    index += blockDim.x;
     __syncthreads();
+    index += blockDim.x;
   }
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
 
 void Diffuser::walk() {
-  const size_t size(voxels_.size());
+  //const size_t size(voxels_.size());
+  const size_t size(9977856);
   concurrent_walk<<<blocks_, 32>>>(
       size,
       stride_,
@@ -512,11 +513,71 @@ void Diffuser::walk() {
       vac_id_,
       null_id_,
       shift_,
+      rsurface_,
+      wsurface_,
       thrust::raw_pointer_cast(&voxels_[0]));
   cudaDeviceSynchronize();
+  //cudaMemcpyFromArray(thrust::raw_pointer_cast(&voxels_[0]), rbuffer_, 0, 0, voxels_.size()*sizeof(voxel_t), cudaMemcpyDeviceToDevice);
+  //cudaDeviceSynchronize();
   //int val(thrust::count(thrust::device, voxels_.begin(), voxels_.end(), 0));
   //std::cout << "val:" << val << std::endl;
 }
+
+/*
+//shfl_down warp collision check with distinct read and write surfaces: 5.76 BUPS
+__global__
+void concurrent_walk(
+    const unsigned voxel_size_,
+    const voxel_t stride_,
+    const voxel_t id_stride_,
+    const voxel_t vac_id_,
+    const voxel_t null_id_,
+    const unsigned shift_,
+    cudaSurfaceObject_t rsurface_,
+    cudaSurfaceObject_t wsurface_,
+    voxel_t* voxels_) {
+  unsigned odd_lay, odd_col, rand, cnt, mask, nmask, collide, active;
+  voxel_t vdx, tar, dxv, dx, mydx;
+  const unsigned block_mols(voxel_size_/gridDim.x);
+  unsigned index(blockIdx.x*block_mols + threadIdx.x);
+  //int laneId = threadIdx.x & 0x1f;
+  int laneId = getLaneId();
+  cnt = block_mols/blockDim.x;
+  curandState local_state = curand_states[blockIdx.x][threadIdx.x];
+  __syncthreads();
+  for(unsigned i(0); i != cnt; ++i) {
+    surf2Dread(&vdx, rsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+    if(vdx) {
+      rand = (((uint32_t)((uint16_t)(curand(&local_state) &
+                0x0000FFFFuL))*12) >> 16);
+      dxv = z2i(vdx);
+      odd_lay = ((dxv/NUM_COLROW)&1);
+      odd_col = ((dxv%NUM_COLROW/NUM_ROW)&1);
+      tar = i2z(mol2_t(dxv)+ offsets[rand+(24&(-odd_lay))+(12&(-odd_col))]);
+      dx = tar >> shift_;
+      mydx = dx;
+      collide = 0;
+      active = __ballot(1);
+      for (int j(1); j <= 16; ++j) {
+        dx = __shfl_down(dx, 1);
+        if((laneId+j)%32&active && dx==mydx) {
+          collide = 1;
+        }
+      }
+      if(!collide) {
+        surf2Dread(&dxv, rsurface_, (mydx%12952)*sizeof(voxel_t), mydx/12952);
+        if(dxv == vac_id_) {
+          surf2Dwrite(tar, wsurface_, (mydx%12952)*sizeof(voxel_t), mydx/12952);
+          surf2Dwrite(vac_id_, wsurface_, (index%12952)*sizeof(voxel_t), index/12952);
+        }
+      }
+    }
+    __syncthreads();
+    index += blockDim.x;
+  }
+  curand_states[blockIdx.x][threadIdx.x] = local_state;
+}
+*/
 
 /*
 //Global memory with shfl_down warp collision and no atomic check: 12.79 BUPS
@@ -638,7 +699,6 @@ void concurrent_walk(
   curand_states[blockIdx.x][threadIdx.x] = local_state;
 }
 */
-
 
 /*
 //shfl_down warp collision check: 14.7 BUPS
